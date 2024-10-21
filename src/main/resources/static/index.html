@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Text Editing with Locking and Sync</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.4.0/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+</head>
+<body>
+
+<h1>Collaborative Text Editing with Locking and Sync</h1>
+
+<!-- Текстовое поле для редактирования -->
+<textarea id="paragraph-1" rows="10" cols="50" disabled oninput="sendTextUpdate('paragraph-1')">This is the first paragraph.</textarea>
+<br>
+<!-- Кнопки для блокировки и разблокировки -->
+<button id="lockButton" onclick="lockParagraph('paragraph-1')">Lock</button>
+<button id="unlockButton" onclick="unlockParagraph('paragraph-1')" disabled>Unlock</button>
+
+<script>
+    var socket = new SockJS('/ws');
+    var stompClient = Stomp.over(socket);
+    var isLockedByMe = false;  // Следим за состоянием блокировки конкретным пользователем
+    var currentLockOwner = null;  // ID пользователя, заблокировавшего поле
+
+    stompClient.connect({}, function (frame) {
+        console.log('Connected: ' + frame);
+
+        // Подписка на изменения блокировки
+        stompClient.subscribe('/topic/locks', function (lockUpdate) {
+            var response = JSON.parse(lockUpdate.body);
+            var textarea = document.getElementById(response.paragraphId);
+            var lockButton = document.getElementById('lockButton');
+            var unlockButton = document.getElementById('unlockButton');
+
+            if (response.locked) {
+                if (response.ownerId === socket._transport.url) {
+                    // Если это наш собственный блок, делаем текст доступным для редактирования
+                    unlockButton.disabled = false;
+                    lockButton.disabled = true;
+                    textarea.disabled = false;  // Разрешаем редактировать текст
+                    isLockedByMe = true;
+                } else {
+                    // Если параграф заблокирован другим пользователем, блокируем поле и кнопку
+                    textarea.disabled = true;
+                    lockButton.disabled = true;
+                    unlockButton.disabled = true;
+                }
+                currentLockOwner = response.ownerId;  // Запоминаем владельца блокировки
+            } else {
+                // Если параграф разблокирован, разрешаем всем блокировать его
+                textarea.disabled = true;  // Блокируем текстовое поле
+                lockButton.disabled = false;  // Включаем кнопку блокировки
+                unlockButton.disabled = true;  // Отключаем кнопку разблокировки для всех
+                isLockedByMe = false;
+                currentLockOwner = null;
+            }
+        });
+
+        // Подписка на изменения текста
+        stompClient.subscribe('/topic/textUpdates', function (textUpdate) {
+            var response = JSON.parse(textUpdate.body);
+            var textarea = document.getElementById(response.paragraphId);
+            textarea.value = response.text;
+        });
+    });
+
+    // Функция для блокировки параграфа
+    function lockParagraph(paragraphId) {
+        stompClient.send("/app/lock", {}, JSON.stringify({
+            'paragraphId': paragraphId,
+            'ownerId': socket._transport.url  // Генерируем уникальный ID для пользователя
+        }));
+    }
+
+    // Функция для разблокировки параграфа
+    function unlockParagraph(paragraphId) {
+        if (isLockedByMe) {  // Только владелец может разблокировать
+            stompClient.send("/app/unlock", {}, JSON.stringify({
+                'paragraphId': paragraphId,
+                'ownerId': socket._transport.url
+            }));
+        }
+    }
+
+    // Функция для отправки обновленного текста
+    function sendTextUpdate(paragraphId) {
+        var text = document.getElementById(paragraphId).value;
+        stompClient.send("/app/updateText", {}, JSON.stringify({
+            'paragraphId': paragraphId,
+            'text': text
+        }));
+    }
+</script>
+
+</body>
+</html>
