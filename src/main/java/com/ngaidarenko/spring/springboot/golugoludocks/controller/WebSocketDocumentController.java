@@ -15,7 +15,6 @@ import org.springframework.stereotype.Controller;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 @Controller
 public class WebSocketDocumentController {
@@ -31,13 +30,15 @@ public class WebSocketDocumentController {
         this.messagingTemplate = messagingTemplate;
     }
 
+    // мб убрать строку с messagingTemplate т.к. это одно и тоже, что и @SentTo() или нет
     @MessageMapping("/lock")
     @SendTo("/topic/locks")
     public LockResponse lockParagraph(LockRequest request) {
         log.info("Sending message: {}", request);
         RLock lock = redissonClient.getLock("lock:" + request.getParagraphId());
+
         try {
-            boolean isLocked = lock.tryLock(10, 10, TimeUnit.SECONDS);
+            boolean isLocked = lock.tryLock();
             if (isLocked) {
                 // Запоминаем владельца блокировки
                 lockOwners.put(request.getParagraphId(), request.getOwnerId());
@@ -47,7 +48,8 @@ public class WebSocketDocumentController {
             } else {
                 return new LockResponse(request.getParagraphId(), false, null);
             }
-        } catch (InterruptedException e) {
+        } catch (Exception e) {
+            log.error("Some interrupted exception: %s", e);
             Thread.currentThread().interrupt();
             return new LockResponse(request.getParagraphId(), false, null);
         }
@@ -58,20 +60,26 @@ public class WebSocketDocumentController {
     public LockResponse unlockParagraph(LockRequest request) {
         log.info("Unlocking paragraph with request: {}", request);
         String ownerId = lockOwners.get(request.getParagraphId());
+
         if (ownerId != null && ownerId.equals(request.getOwnerId())) {
             log.info("Pass a test: ownerId.equals(request.getOwnerId())");
             RLock lock = redissonClient.getLock("lock:" + request.getParagraphId());
-            if (lock.isLocked()) {
+
+            // Проверяем, что блокировка принадлежит текущему потоку
+            if (lock.isHeldByCurrentThread()) {
                 lock.unlock();
-                log.info("Unlocked");
+                log.info("Unlocked by current thread");
                 lockOwners.remove(request.getParagraphId());  // Удаляем владельца после разблокировки
                 messagingTemplate.convertAndSend("/topic/locks",
                         new LockResponse(request.getParagraphId(), false, null));
                 return new LockResponse(request.getParagraphId(), false, null);
+            } else {
+                log.warn("Attempt to unlock by a different thread");
             }
         }
         return new LockResponse(request.getParagraphId(), true, ownerId);  // Не разрешаем другим разблокировать
     }
+
 
     @MessageMapping("/updateText")
     @SendTo("/topic/textUpdates")
